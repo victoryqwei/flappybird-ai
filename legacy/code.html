@@ -1,0 +1,564 @@
+<html>
+	<head>
+		<title>Flappy bird & Neuralevolution</title>
+
+		<style>
+			canvas {
+				border: 1px solid black;
+				display: inline-block;
+			}
+
+			.slider {
+			    -webkit-appearance: none;
+			    width: 100%;
+			    height: 25px;
+			    background: #d3d3d3;
+			    outline: none;
+			    opacity: 0.7;
+			    -webkit-transition: .2s;
+			    transition: opacity .2s;
+			}
+
+			.slider:hover {
+			    opacity: 1;
+			}
+
+			.slider::-webkit-slider-thumb {
+			    -webkit-appearance: none;
+			    appearance: none;
+			    width: 25px;
+			    height: 25px;
+			    background: #4CAF50;
+			    cursor: pointer;
+			}
+
+			html {
+				background: grey;
+			}
+
+			p {
+				margin-top: 5px;
+				margin-bottom: 5px;
+			}
+		</style>
+	</head>
+	<body>
+		<div>
+			<canvas id="canvas" width="1000" height="400"></canvas>
+			<div style="display: inline-block;">
+				<canvas id="stats" width="400" height="400"></canvas>
+			</div>
+			<div class="slidecontainer">
+			  <p style="display: inline-block;margin-right: 5px">Cycle Speed:</p><p id="cycleText" style="display: inline-block;" data-editable>1</p>
+			  <input type="range" min="1" max="100" value="1" class="slider" id="cycleSlider">
+			  <p style="display: inline-block;margin-right: 5px">Jump Range:</p><p id="jumpText" style="display: inline-block;" data-editable>10</p>
+			  <input type="range" min="5" max="12" value="10" class="slider" id="jumpSlider">
+			  <p style="display: inline-block;margin-right: 5px">Bird Population: </p><p id="populationText" style="display: inline-block;" data-editable>1000</p>
+			  <input type="range" min="0" max="500" value="50" class="slider" id="populationSlider">
+			  <p style="display: inline-block;margin-right: 5px">Pipe Spacing: </p><p id="spacingText" style="display: inline-block;" data-editable>150</p>
+			  <input type="range" min="49" max="200" value="150" class="slider" id="spacingSlider">
+			  <p style="display: inline-block;margin-right: 5px">FPS Optimizer: </p><p id="fpsText" style="display: inline-block;" data-editable>Off</p>
+			  <input type="range" min="29" max="50" value="29" class="slider" id="fpsSlider">
+			</div>
+
+			<p id="score">Current Score: 0</p>
+			<p id="highscore" style="display: inline-block;">High Score: 0</p> <button id="resetHighscore">Reset</button>
+			<br />
+			<p id="generation" style="display: inline-block;">Generation: 1</p><button id="runBest" style="display: inline-block;">Run Best Bird</button><button id="runLatest" style="display: inline-block;">Run Latest Bird</button>
+		</div>
+
+		<script src="jquery.js"></script>
+		<script src="vector.js"></script>
+		<script src="matrix.js"></script>
+		<script src="nn.js"></script>
+		<script src="ga.js"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.2/Chart.js"></script>
+		<script>
+			var canvas = document.getElementById("canvas");
+			var ctx = canvas.getContext("2d");
+
+			var cycles = 1;
+			var score = 0;
+			var highScore = 0;
+			var generation = 1;
+
+			var jumpHeight = 8;
+
+			class Bird {
+				constructor (x, y, brain) {
+					this.x = x;
+					this.y = y;
+
+					this.r = 10;
+					this.t = 0;
+					this.peakT = jumpHeight;
+					this.lastY = 200;
+					this.passed = false;
+					this.pipesPassed = 0;
+					
+					this.score = 0;
+					this.fitness = 0;
+					if (brain) {
+						this.brain = brain.copy();
+					} else {
+						this.brain = new NeuralNetwork(5, 16, 2);
+					}
+				}
+
+				move() {
+					this.velocity = (this.t * this.t) - 2*this.peakT*this.t + this.lastY;
+					this.y = this.velocity;
+
+					this.t += 0.5 * delta/16;
+				}
+
+				draw() {
+					ctx.beginPath();
+				    ctx.arc(this.x, this.y, this.r, 0, 2 * Math.PI, false);
+				    ctx.fillStyle = 'yellow';
+				    ctx.fill();
+				    ctx.lineWidth = 2;
+				    ctx.strokeStyle = '#003300';
+				    ctx.stroke();
+				}
+
+				think(pipes) {
+					var closest = pipes[0];
+					var closestD = Infinity;
+					for (var i = 0; i < pipes.length; i++) {
+						var d = pipes[i].x - this.x;
+						if (d < closestD && d > 0) {
+							closest = pipes[i];
+							closestD = d;
+						}
+					}
+
+					var inputs = [];
+					inputs[0] = this.y / canvas.height;
+					inputs[1] = closest.top / canvas.height;
+					inputs[2] = closest.bottom / canvas.height;
+					inputs[3] = closest.x / canvas.width;
+					inputs[4] = (this.t - 10) / 10;
+
+					var output = this.brain.feedForward(inputs);
+
+					if (output[0] > output[1]) {
+						// Jump
+						if (this.t > this.peakT) {
+							this.t = 0;
+							this.lastY = this.y;
+						}
+					}
+				}
+
+				mutate() {
+					this.brain.mutate(0.01);
+				}
+			}
+
+			var population = 500;
+			var latestBird;
+			var highestBird;
+
+			var birds = [];
+			var saved = [];
+
+			for (var i = 0; i < population; i++) {
+				birds.push(new Bird(50, 100));
+			}
+
+			var pipeSpacing = 150;
+
+			class Pipe {
+				constructor (y) {
+					this.width = 20;
+
+					this.x = canvas.width - this.width;
+					this.y = y;
+
+					this.spacing = pipeSpacing;
+					if (this.spacing === 49) {
+						this.spacing = getRandomInt(50, 200);
+					}
+
+					this.top = this.y - this.spacing/2;
+					this.bottom = this.y + this.spacing/2;
+				}
+
+				draw() {
+					ctx.fillStyle = "green";
+					// Draw upper and lower pipe
+					ctx.fillRect(this.x, 0, this.width, this.y - this.spacing/2);
+
+					ctx.fillRect(this.x, this.y + this.spacing/2, this.width, canvas.height - this.y - this.spacing/2);
+				}
+
+				move() {
+					this.x -= 2 * delta/16;
+				}
+			}
+
+			var pipes = [new Pipe(getRandomInt(100, canvas.height - 100))]
+
+			// Charting statistics
+
+			var c = document.getElementById('stats').getContext('2d');
+
+			var generation = 1;
+			var generationAverage = 0;
+			var dataLimit = 20;
+
+			var birdChart = new Chart(c, {
+			    type: 'line',
+			    data: {
+		    		labels: [],
+	        		datasets: [{
+	            		label: "Bird Stats",
+	            		borderColor: 'rgb(255, 99, 132)',
+	            		data: [],
+	            		radius: 0
+	        		}]
+			    },
+			    options: {
+			    	responsive: false,
+			    	maintainAspectRatio: false,
+			    	scales: {
+						yAxes: [{
+					   		scaleLabel: {
+					        	display: true,
+					        	labelString: 'Generation Average Score'
+					    	}
+						}],
+						xAxes: [{
+					   		scaleLabel: {
+					        	display: true,
+					        	labelString: 'Generation #'
+					    	}
+						}]
+					}
+			    }
+			});
+
+			function checkCollision() {
+				for (var i = 0; i < pipes.length; i++) {
+					var upperPipe = {
+						x: pipes[i].x,
+						y: 0,
+						width: pipes[i].width,
+						height: pipes[i].y - pipes[i].spacing/2
+					}
+
+					var lowerPipe = {
+						x: pipes[i].x,
+						y: pipes[i].y + pipes[i].spacing/2,
+						width: pipes[i].width,
+						height: canvas.height - pipes[i].y - pipes[i].spacing/2
+					}
+					for (var j = 0; j < birds.length; j++) {
+						var dead = false;
+						if (birds[j].y > canvas.height || birds[j].y < 0) {
+							// Bird hits Roof
+							dead = true;
+						} else if (rectCircleColliding(birds[j], upperPipe) || rectCircleColliding(birds[j], lowerPipe)) {
+							// Bird hits pipe
+							dead = true;
+						}
+
+						if (dead) {
+							var deadCount = population + 1 - birds.length;
+
+							generationAverage = generationAverage*(deadCount-1);
+							generationAverage += birds[j].pipesPassed;
+							generationAverage = generationAverage/deadCount;
+
+							if (birds.length === 1) {
+								latestBird = birds[j];
+							}
+							saved.push(birds.splice(j, 1)[0]);
+						}
+					}
+				}
+			}
+
+			function update() {
+				for (var i = 0; i < birds.length; i++) {
+					birds[i].think(pipes);
+					birds[i].move();
+
+					birds[i].score++;
+
+					if (birds[i].score > score) {
+						score = birds[i].score;
+					}
+
+					if (score > highScore) {
+						highScore = score;
+						highestBird = birds[i];
+					}
+				}
+
+				
+
+				checkCollision();
+
+				// Move pipes and get rid of pipes offscreen
+				for (var i = 0; i < pipes.length; i++) {
+					pipes[i].move();
+
+					if (pipes[i].x < canvas.width - 300 && !pipes[i].passed) {
+						pipes[i].passed = true;
+
+						pipes.push(new Pipe(getRandomInt(100, canvas.height - 100)))
+					}
+					if (pipes[i].x < -50) {
+						pipes.splice(i, 1);
+						for (var i = 0; i < birds.length; i++) {
+							birds[i].pipesPassed += 1;
+						}
+					}
+				}
+
+				if (birds.length === 0) {
+					generation++;
+					
+					addData(birdChart, generation, generationAverage, dataLimit);
+
+					generationAverage = 0;
+
+					birds = nextGeneration(birds);
+				}
+			}
+
+			function draw() {
+				ctx.fillStyle = "white";
+				ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+				for (var i = 0; i < pipes.length; i++) {
+					pipes[i].draw();
+				}
+
+				for (var i = 0; i < birds.length; i++) {
+					birds[i].draw();
+				}
+
+				$("#score").text("Current Score: " + score);
+				$("#highscore").text("Highscore: " + highScore);
+				$("#generation").text("Generation: " + generation);
+			}
+
+			function optimize() {
+				if (FPS !== 29) {
+					if (averageArray > parseInt($("#fpsSlider")[0].value)) {
+						if ($("#cycleSlider")[0].value < 100) {
+							$("#cycleSlider").val(parseInt($("#cycleSlider").val()) + 1) ;
+							$("#cycleText").text($("#cycleSlider")[0].value);
+							cycles = parseInt($("#cycleSlider")[0].value);
+						}
+					} else if (averageArray < parseInt($("#fpsSlider")[0].value)) {
+						if ($("#cycleSlider")[0].value > 1) {
+							$("#cycleSlider").val(parseInt($("#cycleSlider").val()) - 1) ;
+							$("#cycleText").text($("#cycleSlider")[0].value);
+							cycles = parseInt($("#cycleSlider")[0].value);
+						}
+					}
+				}
+			}
+		       
+		    loop();
+
+		    // Frames optimizer
+
+	        var fps = 200;
+	        var now;
+	        var then = Date.now();
+	        var interval = 1000/fps;
+	        var delta;
+	        var fpsArray = [];
+	        var averageArray;
+
+		    function loop(code) {
+		        requestAnimationFrame(loop);
+		           
+		        now = Date.now();
+		        delta = now - then;
+		           
+		        if (delta > interval) {
+		               
+		            then = now - (delta % interval);
+		            ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+		            // Run the code
+		            for (var i = 0; i < cycles; i++) {
+		            	update();
+		            }
+		    		draw();
+		    		optimize();
+
+		            // Get average frames per second with a 30 frame buffer
+		              
+		            fpsArray.push(1000/delta);
+		            if (fpsArray.length > 30) {
+		                fpsArray.shift();
+		            }
+		              
+		            averageArray = fpsArray.reduce((a, b) => a + b, 0)/fpsArray.length;
+
+		            // Draw the framerate top left of screen
+		            ctx.beginPath();
+		            ctx.font = "50px Arial";
+		            ctx.fillStyle = "red";
+		            ctx.fillText(Math.floor(averageArray), 20, 50);
+		            ctx.closePath();
+		              
+		        }
+		    }
+
+		    $("#cycleSlider").mousemove(function (e) {
+		    	$("#cycleText").text(parseInt($("#cycleSlider").val()))
+
+		    	cycles = parseInt($("#cycleSlider").val());
+		    })
+
+		    $("#jumpSlider").mousemove(function (e) {
+		    	$("#jumpText").text(parseInt($("#jumpSlider").val()))
+
+		    	jumpHeight = parseInt($("#jumpSlider").val());
+		    })
+
+		    $("#populationSlider").trigger("mousemove");
+		    $("#populationSlider").mousemove(function (e) {
+		    	population = parseInt($("#populationSlider").val()) * 20;
+
+		    	if (population === 0) {
+		    		population = 1;
+		    	}
+
+		    	$("#populationText").text(population);
+		    })
+
+		    var FPS = 29;
+
+		    $("#fpsSlider").trigger("mousemove");
+		    $("#fpsSlider").mousemove(function (e) {
+		    	FPS = parseInt($("#fpsSlider").val());
+
+		    	$("#fpsText").text(FPS);
+
+		    	if (FPS === 29) {
+		    		$("#fpsText").text("Off");
+		    	}
+		    })
+
+		    $("#spacingSlider").mousemove(function (e) {
+		    	pipeSpacing = parseInt($("#spacingSlider").val());
+
+		    	$("#spacingText").text(pipeSpacing);
+
+		    	if (pipeSpacing === 49) {
+		    		$("#spacingText").text("Random");
+		    	}
+		    })
+
+		    $("#resetHighscore").click(function () {
+		    	highScore = 0;
+		    })
+
+		    $("#runBest").click(function () {
+		    	population = 1;
+		    	$("#populationSlider")[0].value = 0;
+		    	$("#populationSlider").trigger("mousemove");
+
+		    	birds = [new Bird(50, 100, highestBird.brain.copy())]
+
+		    	pipes = [new Pipe(getRandomInt(100, canvas.height - 100))];
+
+		    	saved = [];
+				score = 0;
+		    })
+
+		    $("#runLatest").click(function () {
+		    	population = 1;
+
+		    	birds = [new Bird(50, 100, latestBird.brain.copy())]
+
+		    	pipes = [new Pipe(getRandomInt(100, canvas.height - 100))]
+
+		    	saved = [];
+				score = 0;
+		    })
+
+		    $('body').on('click', '[data-editable]', function(){
+			  
+			  var $el = $(this);
+
+			  var id = $el[0].id;
+			  var idName = id.replace('Text', '');
+
+			  console.log($el);
+			              
+			  var $input = $('<input/>').val( $el.text() );
+			  $el.replaceWith( $input );
+			  
+			  var save = function(){
+			    var $p = $('<p id=' + id + ' style="display: inline-block;" data-editable />').text( $input.val() );
+			    $("#" + idName + "Slider")[0].value = $input.val();
+			    population = $input.val();
+			    if (population === 0) {
+		    		population = 1;
+		    	}
+		    	$("#populationSlider")[0].value = population / 20;
+		    	$("#populationText").text(population);
+			    $input.replaceWith( $p );
+			  };
+			  
+			  /**
+			    We're defining the callback with `one`, because we know that
+			    the element will be gone just after that, and we don't want 
+			    any callbacks leftovers take memory. 
+			    Next time `p` turns into `input` this single callback 
+			    will be applied again.
+			  */
+			  $input.one('blur', save).focus();
+			  $input.on('keyup', function (e) {
+			    if (e.keyCode == 13) {
+			        save();
+			    }
+			});
+			  
+			});
+
+		    function getRandomInt(min, max) {
+			    return Math.floor(Math.random() * (max - min + 1)) + min;
+			}
+
+			function rectCircleColliding(circle,rect){
+			    var distX = Math.abs(circle.x - rect.x-rect.width/2);
+			    var distY = Math.abs(circle.y - rect.y-rect.height/2);
+
+			    if (distX > (rect.width/2 + circle.r)) { return false; }
+			    if (distY > (rect.height/2 + circle.r)) { return false; }
+
+			    if (distX <= (rect.width/2)) { return true; } 
+			    if (distY <= (rect.height/2)) { return true; }
+
+			    var dx=distX-rect.width/2;
+			    var dy=distY-rect.height/2;
+			    return (dx*dx+dy*dy<=(circle.r*circle.r));
+			}
+
+			function addData(chart, label, data, maximumLength) {
+			    chart.data.labels.push(label);
+			    chart.data.datasets.forEach((dataset) => {
+			        dataset.data.push(data);
+			        if (dataset.data.length > maximumLength) {
+				    	dataset.data.shift();
+				    }
+			    });
+			    if (chart.data.labels.length > maximumLength) {
+			    	chart.data.labels.shift();
+			    }
+			    chart.update();
+			}
+		</script>
+	</body>
+</html>
